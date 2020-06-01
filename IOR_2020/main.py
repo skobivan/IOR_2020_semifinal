@@ -71,34 +71,22 @@ class CameraBottom(Camera):
 
         mask_image = cv.inRange(hsv_image, hsv_mask_min, hsv_mask_max)
 
-        center_x = 0
-        center_y = 100
+        cnt, _ = cv.findContours(mask_image, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
 
-        center_x2 = 0
-        center_y2 = 140
-
-        sum = 0
-        sum2 = 0
-
-        for x in range(0, 320):
-            center_x += mask_image[center_y, x] * x
-            sum += mask_image[center_y, x]
-
-            center_x2 += mask_image[center_y2, x] * x
-            sum2 += mask_image[center_y2, x]
-            
-                
-        if sum:
-            center_x = int(center_x/sum)
-            cv.circle(self.curr_image, (center_x, center_y), 10,  (255, 0, 0))
-        
-        if sum2:
-            center_x2 = int(center_x2/sum2)
-            cv.circle(self.curr_image, (center_x2, center_y2), 10, (255, 0, 0))
-
-        if center_x2 - center_x == 0:
-            return 0
-        return math.atan((center_y2 - center_y)/(center_x-center_x2))
+        if cnt:
+            for c in cnt:
+                area = cv.contourArea(c)
+                if abs(area) < 500:
+                    continue
+                hull = cv.convexHull(c)
+                approx = cv.approxPolyDP(hull, cv.arcLength(c, True) * 0.02, True)
+                if 4 <= len(approx) <= 5:
+                    ((x, y), (w, h), angle) = cv.minAreaRect(approx)
+                    # print(angle, w/float(h))
+                    if w/float(h) < 1.:
+                        return True, -angle
+                    return True, -90-angle
+        return False, 0
 
     def detect_rect(self):
         hsv_mask_min = (20, 50, 50)
@@ -107,9 +95,38 @@ class CameraBottom(Camera):
         image_hsv = cv.cvtColor(self.curr_image, cv.COLOR_BGR2HSV)
         image_mask = cv.inRange(image_hsv, hsv_mask_min, hsv_mask_max)
 
+        cnt, _ = cv.findContours(image_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+
+        copy_curr_img = self.curr_image.copy()
+        if cnt:
+            for c in cnt:
+                area = cv.contourArea(c)
+                if abs(area) < 500:
+                    continue
+                hull = cv.convexHull(c)
+                approx = cv.approxPolyDP(hull, cv.arcLength(c, True) * 0.02, True)
+                # print(len(approx))
+                if 4 <= len(approx) <= 5:
+                    ((x, y), (w, h), angle) = cv.minAreaRect(approx)
+                    aspect_ratio = w / float(h)
+                    # print(aspect_ratio)
+                    if not (0.7  <= aspect_ratio <= 1.7):
+                        cv.drawContours(copy_curr_img, [c], 0, (0, 255, 0), 3)
+                        cv.circle(copy_curr_img, (int(x), int(y)), 5, (0, 255, 0))
+                        cv.imshow('img', copy_curr_img)
+                        cv.imshow('mask', image_mask)
+
+                        cv.waitKey(1)
+                        return True, x, y
+
+        cv.imshow('img', copy_curr_img)
+        cv.imshow('mask', image_mask)
+
+        cv.waitKey(1)
         
+        return False, 0, 0
 
-
+        
 
 class Robot(object):
 
@@ -122,10 +139,10 @@ class Robot(object):
         self.yaw = 0
         self.speed = 0
     def is_depth_stable(self, val):
-        return abs(self.auv.get_depth()-val) < 1e-1
+        return abs(self.auv.get_depth()-val) <= 1e-2
 
     def is_yaw_stable(self, val):
-        return abs(self.auv.get_yaw()-val) < 1e-1
+        return abs(self.auv.get_yaw()-val) <= 1e-2
 
     def keep_yaw(self, yaw, speed):
             error = self.auv.get_yaw() - yaw
@@ -144,23 +161,52 @@ class Robot(object):
         self.auv.set_motor_power(2, output)
         self.auv.set_motor_power(3, output)
     
+    def stop_yaw(self):
+        self.auv.set_motor_power(0, -10)
+        self.auv.set_motor_power(1, -10)
+        time.sleep(0.3)
+        self.auv.set_motor_power(0, 0)
+        self.auv.set_motor_power(1, 0)
+
     def logic(self):
         self.bottom_cam.update_img(self.auv.get_image_bottom())
-
-        # if self.state == 0:
-        #     error = self.bottom_cam.detect_line()/math.pi*180
-        #     print(error)
-        #     self.state += 1
-        #     self.yaw = error + self.auv.get_yaw()
-        # elif self.state == 1:
-        #     if self.is_yaw_stable(self.yaw):
-        #         self.speed = 50
+        # self.bottom_cam.detect_rect()
+        if self.state == 0:
+            (check, error) = self.bottom_cam.detect_line()
+            if (check):
+                # print(error)
+                self.yaw = -error + self.auv.get_yaw()
+                if self.bottom_cam.detect_line()[0] and abs(self.bottom_cam.detect_line()[1]) < 1e-3:
+                    self.state += 1
+        elif self.state == 1:
+            self.speed = 50
+            (check, rect_x, rect_y) = self.bottom_cam.detect_rect()
+            # print(self.speed)
+            if check:
+                # self.stop_yaw()
+                self.speed = 0
+                if 150 <= rect_x <= 170 and 110 <= rect_y <= 130:
+                    self.stop_yaw()
+                    self.speed = 0
+                    self.state += 1
+                else:
+                    try:
+                        error = math.atan((rect_y-120)/(160-rect_x))/math.pi*180
+                    except:
+                        error = -90
+                    error -= 90
+                    if error < -90:
+                        error = error + 180
+                    print(error)
+                    if abs(error) < 1e-2:
+                        self.speed = 50
+                    self.yaw = -error + self.auv.get_yaw()
         # self.bottom_cam.show()
-        # self.keep_depth(2)    
-        # self.keep_yaw(self.yaw, self.speed)
+        self.keep_depth(2)    
+        self.keep_yaw(self.yaw, self.speed)
 
 KP_YAW = 0.8
-KD_YAW = 0.5
+KD_YAW = 0.0
 
 KP_DEPTH = 70
 KD_DEPTH = 5
