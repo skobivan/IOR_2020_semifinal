@@ -21,7 +21,7 @@ class PD(object):
 
     def procces(self, error):
         timestamp = time.time()
-        output = self._kp * error + self._kd / (timestamp - self._timestamp) * (error - self._prev_error)
+        output = self._kp * error + self._kd * (timestamp - self._timestamp) * (error - self._prev_error)
         self._timestamp = timestamp
         self._prev_error = error
         return output
@@ -158,12 +158,12 @@ class CameraBottom(Camera):
         if cnt:
             for c in cnt:
                 area = cv.contourArea(c)
-                if abs(area) < 1000:
+                if abs(area) < 1500:
                     continue
                 hull = cv.convexHull(c)
                 approx = cv.approxPolyDP(hull, cv.arcLength(c, True) * 0.02, True)
                 # print(len(approx))
-                if 4 <= len(approx) <= 5:   
+                if len(approx) == 4:
                     ((x, y), (w, h), angle) = cv.minAreaRect(approx)
                     aspect_ratio = w / float(h)
                     # print(aspect_ratio)
@@ -187,6 +187,7 @@ class CameraBottom(Camera):
 class Robot(object):
 
     def __init__(self, yaw_p, yaw_d, depth_p, depth_d):
+        self.end = False
         self.final = False
         self.auv = mur.mur_init()
         self.yaw_pd = PD(yaw_p, yaw_d)
@@ -239,9 +240,9 @@ class Robot(object):
         self.auv.set_motor_power(3, output)
     
     def stop_yaw(self):
-        self.auv.set_motor_power(0, -10)
-        self.auv.set_motor_power(1, -10)
-        time.sleep(0.3)
+        self.auv.set_motor_power(0, -15)
+        self.auv.set_motor_power(1, -15)
+        time.sleep(0.5)
         self.auv.set_motor_power(0, 0)
         self.auv.set_motor_power(1, 0)
 
@@ -260,13 +261,13 @@ class Robot(object):
                     self.state += 1
         elif self.state == 1:
             self.depth = 2
-            self.speed = 50
+            self.speed = 30
             (check, rect_x, rect_y) = self.bottom_cam.detect_rect()
             # print(self.speed)
             if check:
                 # self.stop_yaw()
                 self.speed = 0
-                if 150 <= rect_x <= 170 and 110 <= rect_y <= 130:
+                if 155 <= rect_x <= 165 and 115 <= rect_y <= 125:
                     self.stop_yaw()
                     self.speed = 0
                     if self.final:
@@ -282,8 +283,8 @@ class Robot(object):
                     if error < -90:
                         error = error + 180
                     # print(error)
-                    if abs(error) < 1.0:
-                        self.speed = 50
+                    if abs(error) < 2.0:
+                        self.speed = 30
                     self.yaw = -error + self.auv.get_yaw()
         elif self.state == 2:
             self.depth = 2
@@ -340,7 +341,7 @@ class Robot(object):
                 (check, x, y, area) = self.front_cam.find_circle(min_masks, max_masks)
                 if not check:
                     print('Where is the circle!?')
-                self.keep_yaw(self.yaw, 50)
+                self.keep_yaw(self.yaw, 30)
                 self.keep_depth(self.depth)
                 time.sleep(0.03)
             self.stop_yaw()
@@ -356,29 +357,37 @@ class Robot(object):
                 self.keep_depth(self.depth)
                 self.keep_yaw(self.yaw, 0)
                 time.sleep(0.03)
-            self.speed = 50
+            self.speed = 30
             self.final = True
             self.state = 1
         elif self.state == 8:
             self.depth = 0
             self.speed = 5
             self.state += 1
+        elif self.state == 9:
+            if self.auv.get_depth() < 0.4:
+                self.end = True
+                self.auv.set_motor_power(0, 0)
+                self.auv.set_motor_power(1, 0)
+                self.auv.set_motor_power(2, 0)
+                self.auv.set_motor_power(3, 0)
+                return
         # self.bottom_cam.show()
         self.keep_depth(self.depth)
         self.keep_yaw(self.yaw, self.speed)
 
-KP_YAW = 0.8
-KD_YAW = 0.0
+KP_YAW = 0.5
+KD_YAW = 40
 
-KP_DEPTH = 50
-KD_DEPTH = 10
+KP_DEPTH = 40
+KD_DEPTH = 100
 
 robot = Robot(KP_YAW, KD_YAW, KP_DEPTH, KD_DEPTH)
 
 while not robot.is_depth_stable(2):
     robot.keep_depth(2)
     time.sleep(0.03)
-while True:
+while not robot.end:
     # robot.keep_depth(2)
     # robot.keep_yaw(50, 0)
     robot.logic()
