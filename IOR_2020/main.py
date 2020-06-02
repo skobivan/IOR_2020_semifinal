@@ -85,6 +85,37 @@ class CameraFront(Camera):
         cv.waitKey(1)
 
         return total_area
+    
+    def find_circle(self, min_masks, max_masks):
+        img_hsv = cv.cvtColor(self.curr_image, cv.COLOR_BGR2HSV)
+        copy_img = self.curr_image.copy()
+        mask = cv.inRange(img_hsv, min_masks[0], max_masks[0])
+        mask += cv.inRange(img_hsv, min_masks[1], max_masks[1])
+        mask += cv.inRange(img_hsv, min_masks[2], max_masks[2])
+
+        cnt, _ = cv.findContours(mask, cv.RETR_CCOMP, cv.CHAIN_APPROX_NONE)
+        for c in cnt:
+            area = cv.contourArea(c)
+            if area < 500:
+                continue
+            hull = cv.convexHull(c)
+            approx = cv.approxPolyDP(hull, cv.arcLength(c, True) * 0.02, True)
+            if len(approx) >= 7:
+                cv.drawContours(copy_img, [c], 0, (0, 0, 255), 3)
+                mm = cv.moments(approx)
+                x = mm['m10']/mm['m00']
+                y = mm['m01']/mm['m00'] 
+                # print(x, y)
+                cv.imshow("img", copy_img)
+                cv.imshow('mask', mask)
+                cv.waitKey(1)
+                return True, x, y, area
+            cv.drawContours(copy_img, [c], 0, (255, 255, 255), 3)
+        cv.imshow("img", copy_img)
+        cv.imshow('mask', mask)
+
+        cv.waitKey(1)
+        return False, 0, 0, 0
 
 
 class CameraBottom(Camera):
@@ -156,6 +187,7 @@ class CameraBottom(Camera):
 class Robot(object):
 
     def __init__(self, yaw_p, yaw_d, depth_p, depth_d):
+        self.final = False
         self.auv = mur.mur_init()
         self.yaw_pd = PD(yaw_p, yaw_d)
         self.depth_pd = PD(depth_p, depth_d)
@@ -180,7 +212,7 @@ class Robot(object):
         self.hsv_mask_min_blue = (130, 40, 20)
         self.hsv_mask_max_blue = (150, 255, 255)
 
-        self.hsv_mask_min_red = (0, 40, 20)
+        self.hsv_mask_min_red = (0, 40, 0)
         self.hsv_mask_max_red = (15, 255, 255)
 
     def is_depth_stable(self, val):
@@ -237,7 +269,10 @@ class Robot(object):
                 if 150 <= rect_x <= 170 and 110 <= rect_y <= 130:
                     self.stop_yaw()
                     self.speed = 0
-                    self.state += 1
+                    if self.final:
+                        self.state = 8
+                    else:
+                        self.state += 1
                 else:
                     try:
                         error = math.atan((rect_y-120)/(160-rect_x))/math.pi*180
@@ -282,9 +317,49 @@ class Robot(object):
                 self.yaw = self.auv.get_yaw() + 90
             print(min_area, min_area_index)
             self.yaw = self.auv.get_yaw() - (180-90*min_area_index)
-            self.auv.shoot()
+            # self.auv.shoot()
             self.state += 1
         elif self.state == 5:
+            min_masks = [self.hsv_mask_min_green, self.hsv_mask_min_blue, self.hsv_mask_min_red]
+            max_masks = [self.hsv_mask_max_green, self.hsv_mask_max_blue, self.hsv_mask_max_red]
+            (check, circle_x, circle_y, area) = self.front_cam.find_circle(min_masks, max_masks)
+            if check:
+                self.yaw = self.auv.get_yaw() - (160 - circle_x)*0.2
+                self.depth = self.auv.get_depth() - (120 - circle_y)*1e-2
+                if abs(circle_y - 120)*0.2 < 1. and abs(circle_x - 160)*1e-2 < 1.:
+                    self.state += 1
+            else:
+                print('Where is the circle!?')
+        elif self.state == 6:
+            min_masks = [self.hsv_mask_min_green, self.hsv_mask_min_blue, self.hsv_mask_min_red]
+            max_masks = [self.hsv_mask_max_green, self.hsv_mask_max_blue, self.hsv_mask_max_red]
+            (check, x, y, area) = self.front_cam.find_circle(min_masks, max_masks)
+            while area < 8000:
+                print(area)
+                self.front_cam.update_img(self.auv.get_image_front())
+                (check, x, y, area) = self.front_cam.find_circle(min_masks, max_masks)
+                if not check:
+                    print('Where is the circle!?')
+                self.keep_yaw(self.yaw, 50)
+                self.keep_depth(self.depth)
+                time.sleep(0.03)
+            self.stop_yaw()
+            t0 = time.time()
+            while time.time() - t0 < 1:
+                self.auv.shoot()
+                self.keep_depth(self.depth)
+                time.sleep(0.03)
+            self.state += 1
+        elif self.state == 7:
+            self.yaw = self.auv.get_yaw() - 180
+            while not self.is_yaw_stable(self.yaw):
+                self.keep_depth(self.depth)
+                self.keep_yaw(self.yaw, 0)
+                time.sleep(0.03)
+            self.speed = 50
+            self.final = True
+            self.state = 1
+        elif self.state == 8:
             self.depth = 0
             self.speed = 5
             self.state += 1
@@ -295,8 +370,8 @@ class Robot(object):
 KP_YAW = 0.8
 KD_YAW = 0.0
 
-KP_DEPTH = 70
-KD_DEPTH = 5
+KP_DEPTH = 50
+KD_DEPTH = 10
 
 robot = Robot(KP_YAW, KD_YAW, KP_DEPTH, KD_DEPTH)
 
